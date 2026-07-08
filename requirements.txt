@@ -1,0 +1,59 @@
+Django==4.2.16
+djangorestframework==3.15.2
+djangorestframework-simplejwt==5.3.1
+django-cors-headers==4.4.0
+django-filter==24.3
+psycopg2-binary==2.9.9
+Pillow==9.5.0
+django-cacheops==7.0.2
+redis==5.0.8
+celery==5.4.0
+python-dotenv==1.0.1
+gunicorn==22.0.0
+whitenoise==6.7.0
+django-ckeditor==6.7.2
+
+# --- Kiem duyet NSFW + tach nguoi & AI tai tao nen (Frame) ---
+# LUU Y: iopaint, rembg, VA insightface (ben duoi) deu keo theo mot ban
+# "opencv-python" hoac "opencv-python-headless" rieng, co the bi cai chong
+# len nhau. Ban opencv-python day du can thu vien he thong libGL.so.1
+# (thuong THIEU tren server/Docker toi gian -> loi "ImportError:
+# libGL.so.1: cannot open shared object file" khi import cv2).
+# Cach xu ly: sau khi `pip install -r requirements.txt`, chay them lenh
+# force-reinstall ban headless de no "de len tren" (xem setup.sh / setup.bat
+# hoac muc 4 trong README).
+opencv-python-headless==4.10.0.84
+torch==2.4.1
+transformers==4.44.2
+rembg==2.0.59
+onnxruntime==1.19.2
+
+# iopaint: dong goi san LaMa/MAT/... - dung ModelManager truc tiep trong
+# process (KHONG chay server rieng). Repo goc da bi archive (khong con
+# cap nhat) nhung ban 1.6.0 la release day du, on dinh, ~23k sao GitHub,
+# dang tin cay hon nhieu so voi goi simple-lama-inpainting da "chet" truoc
+# do. Ghim chat phien ban vi se khong co ban va sau nay.
+iopaint==1.6.0
+
+# --- Nhan dien nguoi noi tieng Viet Nam (yeu cau 1.3.1) ---
+# app/services/celebrity_detection.py dung insightface (ArcFace) de phat
+# hien khuon mat + trich embedding, roi so sanh voi file du lieu san co
+# app/data/celebrity_embeddings.npz (xem scripts/build_celebrity_index.py).
+#
+# QUAN TRONG: PHAI dung ban >= 1.0 (KHONG dung 0.7.x). Tu ban 0.7.3 tro
+# xuong, insightface chi phat hanh dang source (.tar.gz), pip se tu bien
+# dich mot extension C++ (thirdparty/face3d/mesh/cython) luc cai dat -
+# buoc nay can header "Python.h" (goi `python3-dev`/`python3.11-dev` cua
+# he dieu hanh) va trinh bien dich g++, neu thieu se bao loi "fatal error:
+# Python.h: No such file or directory" va cai dat that bai. Tu ban 1.0 tro
+# len, insightface phat hanh dang wheel thuan Python (py3-none-any) -
+# KHONG can bien dich gi ca, cai truc tiep duoc tren moi may. API dung
+# (FaceAnalysis, .prepare(), .get(), face.normed_embedding) khong doi giua
+# 2 ban nay nen khong can sua code trong celebrity_detection.py.
+insightface==1.0.1
+
+# LUU Y: cac thu vien duoi day CHI can khi CHAY LAI
+# scripts/build_celebrity_index.py (build lai file embedding nguoi noi
+# tieng tu dataset HuggingFace) - KHONG can cai tren server production,
+# vi file .npz ket qua da duoc build san va commit vao source code.
+#   pip install datasets huggingface_hub
