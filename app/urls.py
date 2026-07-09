@@ -25,8 +25,10 @@ urlpatterns = [
     # --- Portrait & AI Try-on ---
     re_path('portrait/upload/$', views.upload_portrait),
     re_path('portrait/list/$', views.portrait_list),
+    re_path('portrait/remove-background/(?P<pk>[0-9]+)/$', views.portrait_remove_background),
     re_path('portrait/delete/(?P<pk>[0-9]+)/$', views.portrait_delete),
     re_path('tryon/generate/$', views.generate_tryon),
+    re_path('tryon/status/(?P<pk>[0-9]+)/$', views.tryon_status),
     re_path('tryon/history/$', views.tryon_history),
     re_path('tryon/delete/(?P<pk>[0-9]+)/$', views.tryon_delete),
 

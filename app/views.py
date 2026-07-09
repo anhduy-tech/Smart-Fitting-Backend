@@ -1275,6 +1275,60 @@ def portrait_list(request):
     return Response(data)
 
 
+@api_view(['POST'])
+def portrait_remove_background(request, pk):
+    """
+    Tach nguoi ra khoi nen cho 1 anh chan dung DA upload truoc do (yeu cau
+    1.1.5). Khac voi admin_background_remove() (xoa nguoi, giu/ve lai nen
+    de tao Frame) - ham nay GIU nguoi, XOA nen, luu vao processed_image.
+    Client tu quyet dinh dung original_image hay processed_image khi goi
+    tryon/generate/ (portrait_id truyen vao la id cua Portrait_Photo, be
+    trong generate_tryon_task se tu uu tien processed_image neu da tach).
+    """
+    user = request.user
+    if not user.is_authenticated:
+        return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+    portrait = Portrait_Photo.objects.filter(id=pk, user=user).first()
+    if not portrait:
+        return Response({'error': 'Portrait not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    import io
+    import uuid
+    from PIL import Image as PILImage
+    from django.core.files.base import ContentFile
+    from app.services.portrait_processing import extract_person
+
+    portrait.status = 'processing'
+    portrait.save(update_fields=['status'])
+
+    try:
+        source_image = PILImage.open(portrait.original_image.path)
+        cutout = extract_person(source_image)  # RGBA, nen trong suot
+    except Exception as e:
+        portrait.status = 'failed'
+        portrait.reject_reason = 'Tach nen that bai: ' + str(e)
+        portrait.save(update_fields=['status', 'reject_reason'])
+        return Response({'error': 'Tach nen that bai: ' + str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    buffer = io.BytesIO()
+    cutout.save(buffer, format='PNG')  # PNG de giu kenh alpha (nen trong suot)
+    buffer.seek(0)
+    filename = 'portrait_cut_' + uuid.uuid4().hex[:12] + '.png'
+
+    portrait.processed_image.save(filename, ContentFile(buffer.read()), save=False)
+    portrait.has_background_removed = True
+    portrait.status = 'completed'
+    portrait.save()
+
+    return Response({
+        'id': portrait.id,
+        'original_image': request.build_absolute_uri(portrait.original_image.url),
+        'processed_image': request.build_absolute_uri(portrait.processed_image.url),
+        'has_background_removed': True,
+        'status': portrait.status,
+    })
+
+
 @api_view(['DELETE'])
 def portrait_delete(request, pk):
     """Xoa anh chan dung"""
@@ -1292,24 +1346,59 @@ def portrait_delete(request, pk):
 
 @api_view(['POST'])
 def generate_tryon(request):
-    """Sinh anh thu do ao"""
+    """
+    Sinh anh thu do ao (yeu cau 1.1.6). Tao ban ghi Generated_Image o trang
+    thai 'pending' roi day vao Celery de xu ly nen (tranh block/timeout HTTP
+    request vi model AI co the mat vai giay den vai chuc giay). Client goi
+    GET tryon/status/<id>/ de poll ket qua, hoac xem tryon/history/.
+    """
     user = request.user
     if not user.is_authenticated:
         return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
     product_id = request.data.get('product_id')
     frame_id = request.data.get('frame_id')
     portrait_id = request.data.get('portrait_id')
-    if not product_id:
-        return Response({'error': 'product_id is required'}, status=status.HTTP_400_BAD_REQUEST)
-    product = Product.objects.filter(id=product_id).first()
+    if not product_id or not portrait_id:
+        return Response({'error': 'product_id va portrait_id la bat buoc'}, status=status.HTTP_400_BAD_REQUEST)
+    product = Product.objects.filter(id=product_id, is_active=True).first()
     if not product:
         return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+    portrait = Portrait_Photo.objects.filter(id=portrait_id, user=user).first()
+    if not portrait:
+        return Response({'error': 'Portrait not found'}, status=status.HTTP_404_NOT_FOUND)
     frame = Frame.objects.filter(id=frame_id).first() if frame_id else None
-    portrait = Portrait_Photo.objects.filter(id=portrait_id, user=user).first() if portrait_id else None
-    generated = Generated_Image.objects.create(user=user, portrait=portrait, product=product, frame=frame, status='processing')
-    generated.status = 'completed'
-    generated.save()
-    return Response({'id': generated.id, 'status': generated.status, 'product_name': product.name, 'created_at': generated.created_at}, status=status.HTTP_201_CREATED)
+
+    generated = Generated_Image.objects.create(user=user, portrait=portrait, product=product, frame=frame, status='pending')
+
+    from app.tasks import generate_tryon_task
+    generate_tryon_task.delay(generated.id)
+
+    return Response({
+        'id': generated.id,
+        'status': generated.status,
+        'product_name': product.name,
+        'created_at': generated.created_at,
+        'message': 'Dang xu ly, vui long kiem tra lai qua tryon/status/<id>/',
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+def tryon_status(request, pk):
+    """Kiem tra trang thai 1 lan sinh anh thu do (dung de client poll ket qua)."""
+    user = request.user
+    if not user.is_authenticated:
+        return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+    img = Generated_Image.objects.filter(id=pk, user=user).select_related('product', 'frame').first()
+    if not img:
+        return Response({'error': 'Generated image not found'}, status=status.HTTP_404_NOT_FOUND)
+    return Response({
+        'id': img.id,
+        'status': img.status,
+        'result_image': request.build_absolute_uri(img.result_image.url) if img.result_image else None,
+        'processing_time': img.processing_time,
+        'product_name': img.product.name if img.product else None,
+        'frame_name': img.frame.name if img.frame else None,
+    })
 
 
 @api_view(['GET'])

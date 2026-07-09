@@ -52,6 +52,32 @@ iopaint==1.6.0
 # 2 ban nay nen khong can sua code trong celebrity_detection.py.
 insightface==1.0.1
 
+# --- Thu do AI (app/services/tryon_service.py, yeu cau 1.1.6) ---
+# mediapipe: uoc luong toa do khop xuong (pose) de xac dinh vung ao/quan/
+# vay tren anh - thuan Python, KHONG can build C++ nhu OpenPose ban goc
+# trong repo Fashion-U-Want.
+mediapipe==0.10.14
+
+# diffusers + accelerate + safetensors: chay Stable Diffusion Inpainting +
+# IP-Adapter de "ve" trang phuc vao vung mask do mediapipe xac dinh.
+# torch (dung chung voi rembg/insightface o tren, khong can cai them).
+# Model base "runwayml/stable-diffusion-inpainting" (~5GB) + IP-Adapter
+# "h94/IP-Adapter" (~100MB) se TU DONG TAI ve tu HuggingFace Hub trong lan
+# goi API try-on dau tien (can Internet + ~6GB dung luong trong lan dau).
+# Nen co GPU (NVIDIA, >=8GB VRAM) de chay du nhanh cho production - tren
+# CPU van chay duoc nhung rat cham (vai phut/anh), xem TRYON_DEVICE trong
+# app/services/tryon_service.py neu muon ep chay CPU/GPU.
+#
+# QUAN TRONG: ghim dung 0.27.2 (KHONG dung ban moi hon nhu 0.30.x) vi
+# iopaint==1.6.0 (da cai o tren, dung cho tach nen) phu thuoc cung
+# "diffusers==0.27.2" - neu ghim khac ban se bi loi ResolutionImpossible
+# khi pip install. Ban 0.27.2 van ho tro day du load_ip_adapter()/
+# set_ip_adapter_scale() ma tryon_service.py dung, nen khong anh huong
+# chuc nang try-on.
+diffusers==0.27.2
+accelerate==0.34.2
+safetensors==0.4.5
+
 # LUU Y: cac thu vien duoi day CHI can khi CHAY LAI
 # scripts/build_celebrity_index.py (build lai file embedding nguoi noi
 # tieng tu dataset HuggingFace) - KHONG can cai tren server production,
