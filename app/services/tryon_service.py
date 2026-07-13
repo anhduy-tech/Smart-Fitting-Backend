@@ -26,6 +26,7 @@ sau: chi can sua ham `_run_diffusion_inpaint()` ben duoi, phan con lai
 """
 import io
 import logging
+import uuid
 from functools import lru_cache
 
 import numpy as np
@@ -41,9 +42,32 @@ logger = logging.getLogger(__name__)
 TRYON_BASE_MODEL = getattr(settings, "TRYON_BASE_MODEL", "runwayml/stable-diffusion-inpainting")
 TRYON_IP_ADAPTER_REPO = getattr(settings, "TRYON_IP_ADAPTER_REPO", "h94/IP-Adapter")
 TRYON_IP_ADAPTER_WEIGHT = getattr(settings, "TRYON_IP_ADAPTER_WEIGHT", "ip-adapter_sd15.bin")
-TRYON_IP_ADAPTER_SCALE = getattr(settings, "TRYON_IP_ADAPTER_SCALE", 0.75)
-TRYON_STRENGTH = getattr(settings, "TRYON_STRENGTH", 0.85)  # 0-1, cang cao cang "ve lai" nhieu
-TRYON_GUIDANCE_SCALE = getattr(settings, "TRYON_GUIDANCE_SCALE", 6.0)
+TRYON_IP_ADAPTER_SCALE = getattr(settings, "TRYON_IP_ADAPTER_SCALE", 1.0)
+# Da tang tu 0.75 -> 1.0: voi strength=1.0 (mask duoc nhieu HOAN TOAN),
+# yeu to duy nhat "ep" model ve dung mau/kieu dang ao trong anh san pham
+# la IP-Adapter - o scale 0.75, anh huong cua no co the chua du "ap dao"
+# so voi prior chung cua SD1.5 (model co xu huong ve mot cai ao "hop ly"
+# theo ngu canh anh chup, khong nhat thiet giong anh san pham), dan den
+# ket qua doi mau/kieu dang khong ro ret (da gap thuc te qua chi so
+# mean_abs_pixel_diff tang nhung khong du de nhin thay ro bang mat).
+
+# Thu muc luu anh debug (RAW output cua SD, TRUOC khi ghep lai vao anh
+# goc) de kiem tra truc quan model co thuc su ve dung y muon khong, thay
+# vi chi doan qua chi so mean_abs_pixel_diff. Dat None de tat (production
+# nen tat sau khi debug xong, tranh sinh rac trong media/).
+TRYON_DEBUG_DIR = getattr(settings, "TRYON_DEBUG_DIR", "tryon_debug")
+# QUAN TRONG: strength=1.0 (KHONG phai 0.85 nhu ban truoc). Co che cua
+# StableDiffusionInpaintPipeline: vung mask duoc khoi tao tu ANH GOC lam
+# nhieu mot phan theo ti le `strength` (KHONG phai nhieu hoan toan) roi
+# moi denoise theo prompt/IP-Adapter. O strength<1.0, vung mask van giu
+# lai mot phan cau truc/mau sac cua anh GOC (vd ao soc xanh cu), khien
+# ket qua chi la "bien tau nhe" tren nen cu thay vi THAY HAN trang phuc
+# (da gap thuc te: SD co ve nhung khong du de thay doi mau/kieu dang ro
+# ret). Voi try-on (can thay HAN trang phuc), PHAI dung strength=1.0 de
+# vung mask duoc nhieu HOAN TOAN, model tu do ve moi 100% theo dieu kien
+# IP-Adapter/prompt, khong bi "keo lai" boi anh cu.
+TRYON_STRENGTH = getattr(settings, "TRYON_STRENGTH", 1.0)
+TRYON_GUIDANCE_SCALE = getattr(settings, "TRYON_GUIDANCE_SCALE", 7.5)
 TRYON_STEPS = getattr(settings, "TRYON_STEPS", 30)
 TRYON_DEVICE = getattr(settings, "TRYON_DEVICE", "cuda")  # fallback tu dong ve "cpu" neu khong co GPU
 TRYON_IMAGE_SIZE = getattr(settings, "TRYON_IMAGE_SIZE", 512)  # SD 1.5 lam viec tot nhat o 512x512
@@ -295,36 +319,125 @@ def _flatten_to_rgb(image: Image.Image, bg_color=(255, 255, 255)) -> Image.Image
     return image.convert("RGB")
 
 
+def _get_mask_bbox(mask: Image.Image, margin_ratio: float = 0.15, min_margin_px: int = 20):
+    """
+    Tra ve bounding box (left, top, right, bottom) bao quanh vung mask
+    (pixel > nguong), co them margin (% kich thuoc vung + toi thieu vai
+    chuc px) de model co chut context xung quanh, khong cat sat qua.
+    Tra ve None neu mask rong hoan toan (khong tim duoc pixel nao).
+    """
+    mask_np = np.array(mask.convert("L"))
+    ys, xs = np.where(mask_np > 20)
+    if len(xs) == 0:
+        return None
+
+    left, right = int(xs.min()), int(xs.max())
+    top, bottom = int(ys.min()), int(ys.max())
+    w, h = right - left, bottom - top
+    margin_x = max(int(w * margin_ratio), min_margin_px)
+    margin_y = max(int(h * margin_ratio), min_margin_px)
+
+    img_w, img_h = mask.size
+    left = max(0, left - margin_x)
+    top = max(0, top - margin_y)
+    right = min(img_w, right + margin_x)
+    bottom = min(img_h, bottom + margin_y)
+    return (left, top, right, bottom)
+
+
 def generate_tryon_image(portrait: Image.Image, garment: Image.Image, category_type: str) -> Image.Image:
     """
     Ham chinh: sinh anh nguoi (portrait) mac trang phuc (garment) theo dung
     vung co the (category_type: 'shirt' | 'pants' | 'dress').
     Tra ve anh PIL cung kich thuoc voi portrait goc.
     """
-    original_size = portrait.size
     portrait = _flatten_to_rgb(portrait)
 
     mask = get_garment_region_mask(portrait, category_type)
 
-    # Log ti le dien tich mask (% anh) de de chan doan khi ket qua "khong
-    # doi trang phuc" - neu ti le nay qua thap (~0%), nghia la mask rong/
-    # sai (thuong do khong phat hien duoc pose), chinh la nguyen nhan.
+    # Log ti le dien tich mask (% anh) de de chan doan - luu y ti le nay
+    # co the TU NHIEN thap (vai %) neu nguoi chi chiem 1 phan nho khung
+    # hinh (anh chup toan than ngoai troi) - KHONG hen la mask loi.
     mask_np = np.array(mask)
     mask_coverage = float((mask_np > 30).sum()) / mask_np.size
     logger.info(f"generate_tryon_image: category={category_type}, mask_coverage={mask_coverage:.2%}")
-    if mask_coverage < 0.01:
-        logger.warning(
-            "generate_tryon_image: mask_coverage qua thap (<1%%) - rat co "
-            "the khong phat hien duoc pose hoac mask bi loi, ket qua se "
-            "gan nhu KHONG doi so voi anh goc."
-        )
 
-    raw_result = _run_diffusion_inpaint(portrait, mask, garment, category_type)
+    bbox = _get_mask_bbox(mask)
+    if bbox is None:
+        logger.warning(
+            "generate_tryon_image: mask rong hoan toan (khong tim thay vung "
+            "can inpaint) - tra ve anh goc, khong doi gi ca."
+        )
+        return portrait
+
+    # QUAN TRONG: CROP rieng vung quanh ao (theo bbox cua mask) truoc khi
+    # dua vao model, thay vi resize CA BUC ANH xuong 512x512. Neu nguoi
+    # chi chiem 1 phan nho khung hinh (anh chup toan canh ngoai troi),
+    # resize ca anh se lam vung ao chi con vai chuc pixel trong 512x512
+    # (~vai pixel trong latent 64x64 cua SD) - qua nho de model "ve" ra
+    # thay doi nhin thay duoc, du task chay thanh cong khong loi gi (day
+    # chinh la nguyen nhan "khong doi ao" da gap trong thuc te). Crop
+    # rieng vung ao ra xu ly giup vung do chiem phan lon khung 512x512,
+    # model co du "cho" de thuc su ve trang phuc moi.
+    crop_box = tuple(int(v) for v in bbox)
+    crop_portrait = portrait.crop(crop_box)
+    crop_mask = mask.crop(crop_box)
+    logger.info(f"generate_tryon_image: crop_box={crop_box}, crop_size={crop_portrait.size}")
+
+    raw_result = _run_diffusion_inpaint(crop_portrait, crop_mask, garment, category_type)
+
+    # CHAN DOAN TRUC QUAN: luu lai anh SD vua sinh (raw_result, 512x512,
+    # TRUOC khi resize/composite/paste), CUNG VOI crop_portrait (dau vao)
+    # va crop_mask, de mo bang mat xem model co thuc su ve dung y muon
+    # (vd ao trang) hay khong - dang tin cay hon nhieu so voi chi doan qua
+    # chi so mean_abs_pixel_diff (con so co the "tang" chi vi noise/anh
+    # sang thay doi, khong nhat thiet la doi dung mau/kieu dang mong muon).
+    if TRYON_DEBUG_DIR:
+        try:
+            debug_dir = os.path.join(settings.MEDIA_ROOT, TRYON_DEBUG_DIR)
+            os.makedirs(debug_dir, exist_ok=True)
+            ts = uuid.uuid4().hex[:8]
+            raw_result.save(os.path.join(debug_dir, f"{ts}_1_raw_sd_output.png"))
+            crop_portrait.save(os.path.join(debug_dir, f"{ts}_2_crop_input.png"))
+            crop_mask.save(os.path.join(debug_dir, f"{ts}_3_crop_mask.png"))
+            garment.save(os.path.join(debug_dir, f"{ts}_4_garment_reference.png"))
+            logger.info(
+                f"generate_tryon_image: da luu anh debug tai "
+                f"{debug_dir}/{ts}_*.png - mo truc tiep de xem SD co ve "
+                f"dung y muon khong (dac biet file '1_raw_sd_output.png')."
+            )
+        except Exception as e:
+            logger.warning(f"generate_tryon_image: khong luu duoc anh debug: {e}")
 
     # raw_result dang o kich thuoc TRYON_IMAGE_SIZE vuong -> resize ve dung
-    # kich thuoc portrait goc truoc khi composite, tranh meo ti le.
-    raw_result_resized = raw_result.resize(original_size, Image.LANCZOS)
-    final = _composite(portrait, raw_result_resized, mask)
+    # kich thuoc vung crop truoc khi composite, tranh meo ti le.
+    raw_result_resized = raw_result.resize(crop_portrait.size, Image.LANCZOS)
+
+    # CHAN DOAN: so sanh pixel giua anh truoc/sau trong CHINH vung mask, de
+    # biet CHAC model SD co thuc su "ve" ra thay doi gi khong, truoc khi
+    # composite. Neu diff gan bang 0 -> loi nam o BUOC SINH ANH (SD/IP-
+    # Adapter khong tao duoc thay doi, vd conditioning qua yeu). Neu diff
+    # LON nhung ket qua cuoi van "khong doi" -> loi nam o buoc composite/
+    # paste ve sau, khong phai o SD.
+    before_np = np.array(crop_portrait.resize(raw_result.size)).astype(np.float32)
+    after_np = np.array(raw_result).astype(np.float32)
+    mask_for_diff = np.array(crop_mask.resize(raw_result.size).convert("L")) > 30
+    if mask_for_diff.any():
+        mean_abs_diff = float(np.abs(before_np - after_np)[mask_for_diff].mean())
+    else:
+        mean_abs_diff = 0.0
+    logger.info(
+        f"generate_tryon_image: mean_abs_pixel_diff_trong_mask={mean_abs_diff:.2f} "
+        f"(thang 0-255; <5 nghia la SD gan nhu KHONG doi gi trong vung mask)"
+    )
+
+    crop_final = _composite(crop_portrait, raw_result_resized, crop_mask)
+
+    # Dan vung da xu ly (crop_final) tro lai dung vi tri trong anh goc -
+    # phan CON LAI cua anh (ngoai crop_box) giu nguyen 100% pixel goc,
+    # khong bi dong den.
+    final = portrait.copy()
+    final.paste(crop_final, (crop_box[0], crop_box[1]))
     return final
 
 
