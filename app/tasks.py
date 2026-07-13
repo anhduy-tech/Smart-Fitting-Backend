@@ -43,12 +43,19 @@ def generate_tryon_task(self, generated_image_id):
         if not generated.portrait or not generated.product:
             raise ValueError('Thieu portrait hoac product de sinh anh thu do')
 
-        portrait_path = (
-            generated.portrait.processed_image.path
-            if generated.portrait.has_background_removed and generated.portrait.processed_image
-            else generated.portrait.original_image.path
-        )
-        portrait_img = Image.open(portrait_path)
+        # LUON dung original_image (KHONG dung processed_image da tach nen)
+        # cho buoc try-on:
+        #   1. processed_image la anh RGBA nen trong suot - qua
+        #      generate_tryon_image() se bi convert("RGB") lam lo vien/
+        #      quang DEN quanh nguoi (da gap thuc te, xem ghi chu trong
+        #      tryon_service._flatten_to_rgb()).
+        #   2. Nen den bat thuong lam mediapipe Pose kho dinh vi khop
+        #      xuong chinh xac -> mask vung ao/quan co the sai/rong ->
+        #      ket qua "khong doi ao" nhu da gap.
+        #   3. Khong can thiet: compose_with_frame() o cuoi PIPELINE nay
+        #      da tu tach nen lai tu dau roi, tach nen som o day chi thua
+        #      va gay hai.
+        portrait_img = Image.open(generated.portrait.original_image.path)
         garment_img = Image.open(generated.product.image.path)
         category_type = generated.product.category.category_type if generated.product.category else 'shirt'
 

@@ -309,3 +309,22 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TIME_LIMIT = 5 * 60  # tac vu AI toi da 5 phut truoc khi bi kill
+
+# =============================================================================
+# Celery - phan tach QUEUE cho task AI nang (GPU) va task nhe (I/O, thong bao)
+#
+# Task AI nang (SD Inpainting/try-on...) PHAI chay tren worker rieng voi
+# --pool=solo --concurrency=1 (xem run.sh), vi nhieu process cung luc se
+# tranh nhau VRAM gay CUDA out of memory (da gap thuc te). Task nhe (gui
+# OTP, notification...) khong dung GPU nen chay duoc tren worker prefork
+# binh thuong voi concurrency cao de xu ly duoc nhieu viec cung luc.
+#
+# Neu sau nay them task AI nang moi (vd background-remove chay bat dong bo),
+# nho khai bao them vao CELERY_TASK_ROUTES ben duoi de vao dung queue
+# 'gpu_tasks', neu khong se roi vao 'default' va co the bi chay chung voi
+# task nhe tren worker prefork concurrency cao -> lai gap OOM y het cu.
+# =============================================================================
+CELERY_TASK_DEFAULT_QUEUE = 'default'
+CELERY_TASK_ROUTES = {
+    'app.tasks.generate_tryon_task': {'queue': 'gpu_tasks'},
+}

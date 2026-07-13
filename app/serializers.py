@@ -1,4 +1,5 @@
 from django.apps import apps
+from django.db.models import BooleanField
 from rest_framework import serializers
 from app.models import *
 
@@ -13,11 +14,25 @@ def get_serializer(name):
     except:
         return None, None
 
+    # QUAN TRONG: DRF KHONG tu dong ke thua default=True (hay bat ky
+    # default nao) tu model sang serializer field cho BooleanField. Khi
+    # request gui qua form-data/multipart va KHONG gui field do, DRF coi
+    # nhu 1 checkbox HTML chua duoc tick -> tu dong gan False, BAT KE
+    # model co default=True hay khong (vd Product.is_active, Frame.is_active).
+    # Phai chi dinh ro extra_kwargs['default'] cho tung BooleanField de
+    # serializer dung dung gia tri mac dinh cua model khi field bi thieu.
+    boolean_field_kwargs = {
+        f.name: {'default': f.default}
+        for f in Model._meta.fields
+        if isinstance(f, BooleanField) and f.has_default()
+    }
+
     class GenericSerializer(serializers.ModelSerializer):
         class Meta:
             model = Model
             fields = '__all__'
             read_only_fields = ['created_at', 'updated_at'] if hasattr(Model, 'created_at') else []
+            extra_kwargs = boolean_field_kwargs
 
         def create(self, validated_data):
             return Model.objects.create(**validated_data)

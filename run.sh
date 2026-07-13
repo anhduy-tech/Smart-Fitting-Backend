@@ -10,6 +10,23 @@
 #   ./run.sh --skip-migrate   # bo qua buoc migrate tu dong
 #   ./run.sh --timeout 60     # doi toi da 60s cho DB/Redis (mac dinh 30s)
 #
+#   ./run.sh --worker-gpu       # chay Celery worker CHO QUEUE 'gpu_tasks'
+#                                # (task AI nang: try-on...). LUON chay
+#                                # --pool=solo --concurrency=1 - BAT BUOC,
+#                                # nhieu process cung luc se tranh nhau
+#                                # VRAM gay "CUDA out of memory".
+#   ./run.sh --worker-default   # chay Celery worker CHO QUEUE 'default'
+#                                # (task nhe: OTP, notification...) - prefork,
+#                                # concurrency cao hon binh thuong duoc.
+#   ./run.sh --all              # chay CUNG LUC: Django dev server +
+#                                # worker-gpu + worker-default trong 1
+#                                # terminal (tien cho dev). Ctrl+C se tu
+#                                # dong dung ca 3. KHONG dung --all cho
+#                                # production - production nen chay 3
+#                                # process nay o 3 service/container rieng
+#                                # (vd 3 systemd unit hoac 3 Docker service)
+#                                # de scale/restart doc lap nhau.
+#
 set -uo pipefail
 
 # ---------------------------------------------------------------------------
@@ -39,6 +56,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-migrate)
             SKIP_MIGRATE=true
+            shift
+            ;;
+        --worker-gpu)
+            MODE="worker-gpu"
+            shift
+            ;;
+        --worker-default)
+            MODE="worker-default"
+            shift
+            ;;
+        --all)
+            MODE="all"
             shift
             ;;
         -h|--help)
@@ -85,6 +114,12 @@ if ! python -c "import django" >/dev/null 2>&1; then
     log_err "Chua cai dependencies. Hay chay: pip install -r requirements.txt"
     exit 1
 fi
+if [[ "$MODE" == "worker-gpu" || "$MODE" == "worker-default" || "$MODE" == "all" ]]; then
+    if ! python -c "import celery" >/dev/null 2>&1; then
+        log_err "Chua cai celery. Hay chay: pip install -r requirements.txt"
+        exit 1
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Kiem tra Database + Redis da san sang va ket noi duoc chua
@@ -102,8 +137,10 @@ fi
 
 # ---------------------------------------------------------------------------
 # 4. Chay migrate (tu dong ap dung migration con thieu) - co the tat bang --skip-migrate
+#    Bo qua hoan toan neu chi chay worker (worker khong can migrate, Django
+#    server da lo migrate roi - tranh 2 process cung migrate 1 luc).
 # ---------------------------------------------------------------------------
-if [[ "$SKIP_MIGRATE" == false ]]; then
+if [[ "$SKIP_MIGRATE" == false && "$MODE" != "worker-gpu" && "$MODE" != "worker-default" ]]; then
     log_info "Ap dung migrations..."
     if ! python manage.py migrate --noinput; then
         log_err "Migrate that bai. Dung lai."
@@ -111,11 +148,80 @@ if [[ "$SKIP_MIGRATE" == false ]]; then
     fi
     log_ok "Migrate xong."
 else
-    log_info "Bo qua migrate (--skip-migrate)."
+    log_info "Bo qua migrate."
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Chay backend
+# 5. Cac ham chay tung loai worker (dung chung cho MODE=worker-* va MODE=all)
+# ---------------------------------------------------------------------------
+run_worker_gpu() {
+    # --pool=solo --concurrency=1 la BAT BUOC cho queue nay: cac task AI
+    # nang (try-on, Stable Diffusion...) dung chung 1 GPU, chay >1 process
+    # cung luc se tranh nhau VRAM va gay loi "CUDA out of memory" (da gap
+    # thuc te). KHONG tang concurrency cho worker nay du server co GPU
+    # manh hay VRAM lon co nao - GPU khong chia se VRAM tot giua nhieu
+    # process nhu CPU/RAM.
+    log_ok "Chay Celery worker [gpu_tasks] (pool=solo, concurrency=1)..."
+    exec celery -A fitting_app worker --loglevel=info --pool=solo --concurrency=1 \
+        -Q gpu_tasks -n gpu_worker@%h
+}
+
+run_worker_default() {
+    # Task nhe (gui OTP, notification, cac tac vu I/O khac sau nay) khong
+    # dung GPU nen chay prefork binh thuong duoc, concurrency cao hon de
+    # xu ly nhieu viec song song.
+    log_ok "Chay Celery worker [default] (pool=prefork, concurrency=4)..."
+    exec celery -A fitting_app worker --loglevel=info --concurrency=4 \
+        -Q default -n default_worker@%h
+}
+
+if [[ "$MODE" == "worker-gpu" ]]; then
+    run_worker_gpu
+    exit 0
+fi
+
+if [[ "$MODE" == "worker-default" ]]; then
+    run_worker_default
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Che do --all: chay Django + ca 2 Celery worker cung luc (chi cho dev).
+#    Dung trap de dam bao Ctrl+C se giet HET cac process con, khong de
+#    worker chay "mo coi" ngam sau khi tuong da tat het.
+# ---------------------------------------------------------------------------
+if [[ "$MODE" == "all" ]]; then
+    log_info "Che do --all: chay Django + worker-gpu + worker-default cung luc (chi danh cho dev)."
+
+    PIDS=()
+    cleanup() {
+        log_info "Dang dung tat ca process con..."
+        for pid in "${PIDS[@]}"; do
+            kill "$pid" 2>/dev/null || true
+        done
+        wait 2>/dev/null
+        log_ok "Da dung xong."
+    }
+    trap cleanup EXIT INT TERM
+
+    celery -A fitting_app worker --loglevel=info --pool=solo --concurrency=1 \
+        -Q gpu_tasks -n gpu_worker@%h &
+    PIDS+=("$!")
+
+    celery -A fitting_app worker --loglevel=info --concurrency=4 \
+        -Q default -n default_worker@%h &
+    PIDS+=("$!")
+
+    log_ok "Chay dev server tren 0.0.0.0:${PORT} ..."
+    python manage.py runserver "0.0.0.0:${PORT}" &
+    PIDS+=("$!")
+
+    wait
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Chay backend (mac dinh: dev hoac --prod)
 # ---------------------------------------------------------------------------
 if [[ "$MODE" == "prod" ]]; then
     log_ok "Chay backend bang gunicorn tren 0.0.0.0:${PORT} ..."

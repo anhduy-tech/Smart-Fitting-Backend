@@ -94,10 +94,23 @@ def get_serializer(name):
     except:
         return None, None
 
+    # QUAN TRONG: DRF KHONG tu dong ke thua default=True tu model sang
+    # serializer field cho BooleanField - khi request gui qua form-data
+    # va KHONG gui field do, DRF coi nhu checkbox chua tick -> tu dong
+    # gan False, bat ke model co default=True. Chi dinh ro extra_kwargs
+    # cho tung BooleanField de dung dung default cua model (xem cung 1
+    # loi da sua o app/serializers.py).
+    boolean_field_kwargs = {
+        f.name: {'default': f.default}
+        for f in Model._meta.fields
+        if isinstance(f, aggregator.BooleanField) and f.has_default()
+    }
+
     class GenericSerializer(serializers.ModelSerializer):
         class Meta:
             model = Model
             fields = '__all__'
+            extra_kwargs = boolean_field_kwargs
 
         def create(self, validated_data):
             return Model.objects.create(**validated_data)
@@ -1361,8 +1374,21 @@ def generate_tryon(request):
     if not product_id or not portrait_id:
         return Response({'error': 'product_id va portrait_id la bat buoc'}, status=status.HTTP_400_BAD_REQUEST)
     product = Product.objects.filter(id=product_id, is_active=True).first()
+    if not product_id or not portrait_id:
+        return Response({'error': 'product_id va portrait_id la bat buoc'}, status=status.HTTP_400_BAD_REQUEST)
+
+    product = Product.objects.filter(id=product_id, is_active=True).first()
     if not product:
-        return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'error': 'Product not found',
+            'debug_info': {
+                'product_id': product_id,
+                'product_id_type': str(type(product_id)),
+                'exists_any': Product.objects.filter(id=product_id).exists(),
+                'is_active': getattr(product_any, 'is_active', None) if product_any else None,
+                'request_data_keys': list(request.data.keys())
+            }
+        }, status=status.HTTP_404_NOT_FOUND)
     portrait = Portrait_Photo.objects.filter(id=portrait_id, user=user).first()
     if not portrait:
         return Response({'error': 'Portrait not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -1860,6 +1886,7 @@ def admin_category_create(request):
     Model, Serializer = get_serializer('Product_Category')
     serializer = Serializer(data=request.data)
     if serializer.is_valid():
+        serializer.save()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1872,6 +1899,7 @@ def admin_frame_create(request):
     Model, Serializer = get_serializer('Frame')
     serializer = Serializer(data=request.data)
     if serializer.is_valid():
+        serializer.save()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1884,6 +1912,7 @@ def admin_frame_category_create(request):
     Model, Serializer = get_serializer('Frame_Category')
     serializer = Serializer(data=request.data)
     if serializer.is_valid():
+        serializer.save()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

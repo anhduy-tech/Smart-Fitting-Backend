@@ -159,6 +159,18 @@ def get_garment_region_mask(portrait: Image.Image, category_type: str) -> Image.
 # =============================================================================
 # 2. Model sinh anh (Stable Diffusion Inpainting + IP-Adapter)
 # =============================================================================
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+# Bat cac ky thuat tiet kiem VRAM cua diffusers. Voi GPU VRAM nho (<8GB,
+# vd laptop 4-6GB), enable_model_cpu_offload() giup giam dung luong VRAM
+# CAN THIET RAT NHIEU (chi giu 1 phan model tren GPU tai 1 thoi diem, phan
+# con lai o RAM thuong, tu dong hoan doi qua lai) - danh doi lay toc do
+# cham hon 1 chut, nhung tranh duoc loi "CUDA out of memory" hoan toan.
+# Co the tat qua .env neu chay tren GPU VRAM lon (>=12GB) de uu tien toc do.
+TRYON_LOW_VRAM_MODE = getattr(settings, "TRYON_LOW_VRAM_MODE", True)
+
+
 @lru_cache(maxsize=1)
 def _load_pipeline():
     import torch
@@ -172,8 +184,41 @@ def _load_pipeline():
     pipe = StableDiffusionInpaintPipeline.from_pretrained(TRYON_BASE_MODEL, torch_dtype=dtype, safety_checker=None)
     pipe.load_ip_adapter(TRYON_IP_ADAPTER_REPO, subfolder="models", weight_name=TRYON_IP_ADAPTER_WEIGHT)
     pipe.set_ip_adapter_scale(TRYON_IP_ADAPTER_SCALE)
-    pipe = pipe.to(device)
+
+    # QUAN TRONG: KHONG duoc goi pipe.enable_attention_slicing() o day!
+    # enable_attention_slicing() ghi de TOAN BO attention processor cua
+    # UNet thanh SlicedAttnProcessor (xem diffusers/models/attention_
+    # processor.py: Attention.set_attention_slice()), xoa mat processor
+    # dac biet (IPAdapterAttnProcessor) ma load_ip_adapter() vua cai o
+    # tren de hieu dinh dang tuple (text_embeds, image_embeds) - gay loi
+    # "'tuple' object has no attribute 'shape'" khi inference (da gap
+    # thuc te). Chi bat enable_vae_slicing() (an toan, chi dung cho VAE,
+    # khong dung UNet attention) de tiet kiem VRAM.
+    pipe.enable_vae_slicing()
+
+    if device == "cuda" and TRYON_LOW_VRAM_MODE:
+        # enable_model_cpu_offload() TU QUAN LY viec chuyen model len GPU,
+        # nen KHONG duoc goi pipe.to(device) rieng nua (offload se lo dua
+        # tung phan len GPU dung luc can). Day la ly do chinh giup GPU
+        # VRAM nho (vd 5-6GB nhu log loi ban gap) van chay duoc SD1.5 +
+        # IP-Adapter ma khong OOM.
+        pipe.enable_model_cpu_offload()
+        logger.info("TRYON_LOW_VRAM_MODE=True: da bat model CPU offload (cham hon nhung an toan voi GPU VRAM nho).")
+    else:
+        pipe = pipe.to(device)
+
     return pipe, device
+
+
+def _clear_gpu_cache():
+    """Giai phong VRAM dem (cache) sau moi lan sinh anh, tranh VRAM 'phinh'
+    dan qua nhieu request lien tiep trong cung 1 worker process song."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 _CATEGORY_PROMPT = {
@@ -209,6 +254,12 @@ def _run_diffusion_inpaint(portrait: Image.Image, mask: Image.Image, garment: Im
         guidance_scale=TRYON_GUIDANCE_SCALE,
         num_inference_steps=TRYON_STEPS,
     ).images[0]
+
+    # Giai phong VRAM dem ngay sau khi sinh xong - quan trong voi GPU VRAM
+    # nho, tranh VRAM "phinh" dan qua nhieu request lien tiep trong cung 1
+    # worker process song (Celery voi --pool=solo giu process song lau dai).
+    _clear_gpu_cache()
+
     return result
 
 
@@ -223,6 +274,27 @@ def _composite(before: Image.Image, after: Image.Image, mask: Image.Image) -> Im
     return Image.composite(after, before, mask_l)
 
 
+def _flatten_to_rgb(image: Image.Image, bg_color=(255, 255, 255)) -> Image.Image:
+    """
+    Chuyen anh sang RGB AN TOAN cho anh co kenh alpha (RGBA/LA/P co
+    transparency): GHEP (composite) len tren 1 nen mau dong nhat truoc,
+    KHONG goi .convert("RGB") truc tiep.
+
+    Ly do: .convert("RGB") tren anh RGBA chi DROP kenh alpha va giu
+    nguyen gia tri RGB tho o vung "trong suot" - gia tri nay thuong la
+    mau den/rac tuy cach anh RGBA duoc tao (vd ket qua rembg hay co vien
+    ban trong (semi-transparent) do alpha matting o ria toc/nguoi), gay
+    ra "vien/quang DEN" ro ret quanh chu the khi hien thi/xu ly tiep (da
+    gap thuc te voi anh da tach nen dua vao pipeline try-on).
+    """
+    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+        image = image.convert("RGBA")
+        background = Image.new("RGB", image.size, bg_color)
+        background.paste(image, mask=image.split()[3])
+        return background
+    return image.convert("RGB")
+
+
 def generate_tryon_image(portrait: Image.Image, garment: Image.Image, category_type: str) -> Image.Image:
     """
     Ham chinh: sinh anh nguoi (portrait) mac trang phuc (garment) theo dung
@@ -230,9 +302,23 @@ def generate_tryon_image(portrait: Image.Image, garment: Image.Image, category_t
     Tra ve anh PIL cung kich thuoc voi portrait goc.
     """
     original_size = portrait.size
-    portrait = portrait.convert("RGB")
+    portrait = _flatten_to_rgb(portrait)
 
     mask = get_garment_region_mask(portrait, category_type)
+
+    # Log ti le dien tich mask (% anh) de de chan doan khi ket qua "khong
+    # doi trang phuc" - neu ti le nay qua thap (~0%), nghia la mask rong/
+    # sai (thuong do khong phat hien duoc pose), chinh la nguyen nhan.
+    mask_np = np.array(mask)
+    mask_coverage = float((mask_np > 30).sum()) / mask_np.size
+    logger.info(f"generate_tryon_image: category={category_type}, mask_coverage={mask_coverage:.2%}")
+    if mask_coverage < 0.01:
+        logger.warning(
+            "generate_tryon_image: mask_coverage qua thap (<1%%) - rat co "
+            "the khong phat hien duoc pose hoac mask bi loi, ket qua se "
+            "gan nhu KHONG doi so voi anh goc."
+        )
+
     raw_result = _run_diffusion_inpaint(portrait, mask, garment, category_type)
 
     # raw_result dang o kich thuoc TRYON_IMAGE_SIZE vuong -> resize ve dung
