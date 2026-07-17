@@ -1,29 +1,5 @@
 """
 catvton_engine.py
-------------------
-Gần như NGUYÊN VĂN file tryon_service.py đã test chạy thành công (40/40 bước,
-verify bằng traceback thật trên máy dev) khi chạy độc lập trong ~/catvton.
-CHỈ khác 2 chỗ so với bản gốc:
-  1. Thêm _ensure_catvton_on_path() để tìm được `model`/`utils` khi chạy từ
-     Django (không còn đứng ở gốc repo ~/catvton nữa).
-  2. Thêm skip_safety_check=True (project đã có moderation.py riêng, tránh
-     lỗi thiếu file NSFW.jpg placeholder + tiết kiệm VRAM/RAM).
-
-KHÔNG sửa gì thêm logic bên trong TryOnEngine — giữ nguyên bản đã verify.
-
-Dùng cho cả 2 trường hợp:
-  - upper (áo)
-  - lower (quần)
-  - overall (bộ đồ / váy liền)
-
-Độ chính xác cao phụ thuộc nhiều vào:
-  1. Ảnh người: đứng thẳng, nền đơn giản, ánh sáng đều, full-body hoặc half-body
-     tuỳ loại quần áo.
-  2. Ảnh quần áo: chụp phẳng (flat-lay) hoặc trên mannequin, nền trắng/đơn sắc
-     cho kết quả tốt nhất.
-  3. Mask: AutoMasker tự sinh mask qua DensePose + SCHP, nhưng nếu ảnh người
-     phức tạp (nhiều lớp áo, phụ kiện che), nên cho phép người dùng vẽ tay mask
-     (xem app.py gốc — ImageEditor) để tăng độ chính xác.
 """
 
 import os

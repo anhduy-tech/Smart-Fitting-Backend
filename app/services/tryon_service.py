@@ -1,16 +1,5 @@
 """
 app/services/tryon_service.py
-
-CHỈ LÀ ADAPTER MỎNG — toàn bộ logic CatVTON thật sự nằm trong
-`catvton_engine.py` (TryOnEngine, đã verify chạy thành công 40/40 bước).
-File này KHÔNG tự viết lại logic, chỉ:
-  1. Khởi tạo TryOnEngine 1 lần (lru_cache) dựa theo settings Django.
-  2. Chuyển đổi interface generate_tryon_image(portrait, garment, category_type)
-     mà tasks.py đang gọi, sang engine.run(...).
-  3. Giữ nguyên compose_with_frame() từ bản cũ (không liên quan đến model).
-
-GIAY PHEP: CatVTON la CC BY-NC-SA 4.0 (NonCommercial) - xem lai dieu khoan
-neu day la du an thuong mai.
 """
 import logging
 import os
@@ -102,17 +91,7 @@ def generate_tryon_image(portrait: Image.Image, garment: Image.Image, category_t
 
 
 def compose_with_frame(tryon_image: Image.Image, frame_image: Image.Image) -> Image.Image:
-    """Ghep ket qua vao khung nen - KHONG lien quan gi model try-on.
 
-    LUU Y VE VIEN TRANG/HALO: get_person_mask() mac dinh DILATE (no rong)
-    mask ra ngoai - thiet ke cho use case KHAC (xoa nguoi khoi anh de tao
-    Frame trong, can lay du vung de inpaint sach). O day muc dich NGUOC
-    LAI - cat nguoi de dan sang nen moi - nen can ERODE (co mask vao trong)
-    de loai bo han vien pixel PHA TRON voi mau nen CU (tryon_image), tranh
-    hien tuong "halo" khi dan len nen MOI co mau khac. Dilate se lam van
-    de nay TE HON (lay them ca vien pha mau), khong phai giai phap dung
-    cho truong hop cat-dan nay.
-    """
     import cv2
     import numpy as np
     from app.services.background_inpaint import get_person_mask
@@ -124,7 +103,7 @@ def compose_with_frame(tryon_image: Image.Image, frame_image: Image.Image) -> Im
     # Erode mask vao trong ~2-3px de cat bo han vung bien pha mau nen cu,
     # roi blur NHE lai de co canh mem tu nhien ma khong keo mau nen cu vao.
     mask_np = np.array(person_mask)
-    erode_kernel = np.ones((5, 5), np.uint8)
+    erode_kernel = np.ones((10, 10), np.uint8)
     mask_np = cv2.erode(mask_np, erode_kernel, iterations=1)
     mask_np = cv2.GaussianBlur(mask_np, (5, 5), 0)
     person_mask = Image.fromarray(mask_np)
