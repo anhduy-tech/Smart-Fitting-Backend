@@ -1364,6 +1364,16 @@ def generate_tryon(request):
     thai 'pending' roi day vao Celery de xu ly nen (tranh block/timeout HTTP
     request vi model AI co the mat vai giay den vai chuc giay). Client goi
     GET tryon/status/<id>/ de poll ket qua, hoac xem tryon/history/.
+
+    Body them tham so tuy chon `use_processed_portrait` (bool, mac dinh
+    False): Portrait_Photo co the co ca original_image (anh goc, con nen
+    that) va processed_image (anh da tach nen, RGBA trong suot, chi co khi
+    da goi portrait/<id>/remove-background/ truoc do). Client tu chon dung
+    anh nao lam dau vao cho try-on:
+      - False (mac dinh) -> dung original_image
+      - True             -> dung processed_image (neu portrait chua tach
+        nen, se TU DONG fallback ve original_image va bao 'warning' trong
+        response, khong bao loi 400 de khong chan luong xu ly).
     """
     user = request.user
     if not user.is_authenticated:
@@ -1371,6 +1381,7 @@ def generate_tryon(request):
     product_id = request.data.get('product_id')
     frame_id = request.data.get('frame_id')
     portrait_id = request.data.get('portrait_id')
+    use_processed_portrait = str(request.data.get('use_processed_portrait', False)).lower() in ('true', '1', 'yes')
     if not product_id or not portrait_id:
         return Response({'error': 'product_id va portrait_id la bat buoc'}, status=status.HTTP_400_BAD_REQUEST)
     product = Product.objects.filter(id=product_id, is_active=True).first()
@@ -1394,18 +1405,27 @@ def generate_tryon(request):
         return Response({'error': 'Portrait not found'}, status=status.HTTP_404_NOT_FOUND)
     frame = Frame.objects.filter(id=frame_id).first() if frame_id else None
 
+    warning = None
+    if use_processed_portrait and not (portrait.has_background_removed and portrait.processed_image):
+        use_processed_portrait = False
+        warning = 'use_processed_portrait=true nhung portrait chua duoc tach nen (goi portrait/<id>/remove-background/ truoc) - da tu dong dung original_image thay the.'
+
     generated = Generated_Image.objects.create(user=user, portrait=portrait, product=product, frame=frame, status='pending')
 
     from app.tasks import generate_tryon_task
-    generate_tryon_task.delay(generated.id)
+    generate_tryon_task.delay(generated.id, use_processed_portrait)
 
-    return Response({
+    response_data = {
         'id': generated.id,
         'status': generated.status,
         'product_name': product.name,
         'created_at': generated.created_at,
+        'used_processed_portrait': use_processed_portrait,
         'message': 'Dang xu ly, vui long kiem tra lai qua tryon/status/<id>/',
-    }, status=status.HTTP_201_CREATED)
+    }
+    if warning:
+        response_data['warning'] = warning
+    return Response(response_data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET'])

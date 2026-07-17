@@ -17,10 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task(bind=True, max_retries=1, default_retry_delay=10)
-def generate_tryon_task(self, generated_image_id):
+def generate_tryon_task(self, generated_image_id, use_processed_portrait=False):
     """
     Sinh anh thu do cho 1 ban ghi Generated_Image (yeu cau 1.1.6):
-      1. Doc anh chan dung (uu tien ban da tach nen neu co) + anh san pham.
+      1. Doc anh chan dung (original_image hoac processed_image tuy client
+         chon qua use_processed_portrait - xem generate_tryon() trong
+         views.py) + anh san pham.
       2. Goi tryon_service.generate_tryon_image() de "mac" trang phuc vao.
       3. Neu co chon Frame -> ghep them vao khung nen bang compose_with_frame().
       4. Luu ket qua vao result_image, cap nhat status/processing_time.
@@ -43,19 +45,10 @@ def generate_tryon_task(self, generated_image_id):
         if not generated.portrait or not generated.product:
             raise ValueError('Thieu portrait hoac product de sinh anh thu do')
 
-        # LUON dung original_image (KHONG dung processed_image da tach nen)
-        # cho buoc try-on:
-        #   1. processed_image la anh RGBA nen trong suot - qua
-        #      generate_tryon_image() se bi convert("RGB") lam lo vien/
-        #      quang DEN quanh nguoi (da gap thuc te, xem ghi chu trong
-        #      tryon_service._flatten_to_rgb()).
-        #   2. Nen den bat thuong lam mediapipe Pose kho dinh vi khop
-        #      xuong chinh xac -> mask vung ao/quan co the sai/rong ->
-        #      ket qua "khong doi ao" nhu da gap.
-        #   3. Khong can thiet: compose_with_frame() o cuoi PIPELINE nay
-        #      da tu tach nen lai tu dau roi, tach nen som o day chi thua
-        #      va gay hai.
-        portrait_img = Image.open(generated.portrait.original_image.path)
+        if use_processed_portrait and generated.portrait.processed_image:
+            portrait_img = Image.open(generated.portrait.processed_image.path)
+        else:
+            portrait_img = Image.open(generated.portrait.original_image.path)
         garment_img = Image.open(generated.product.image.path)
         category_type = generated.product.category.category_type if generated.product.category else 'shirt'
 
